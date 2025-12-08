@@ -15,11 +15,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Task (Taskfile runner)
+      - name: Install Task
         run: |
-          curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b /usr/local/bin
+          sudo snap install task --classic 2>&1
           task --version
+
+      - name: Build tools container image
+        run: |
+          docker build -t supply-chain-tools -f tools/Dockerfile .
 
       - name: Run all security scans
         run: |
           task scan-all
+
