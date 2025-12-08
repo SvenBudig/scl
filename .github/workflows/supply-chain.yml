@@ -9,13 +9,13 @@ permissions:
 
 jobs:
   security:
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Taskfile runner
+      - name: Install Task
         uses: arduino/setup-task@v1
         with:
           version: 'latest'
