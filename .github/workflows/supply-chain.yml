@@ -1,0 +1,25 @@
+name: security-scan
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Taskfile runner
+        uses: arduino/setup-task@v1
+        with:
+          version: 'latest'
+
+      - name: Run all security scans
+        run: |
+          task scan-all
