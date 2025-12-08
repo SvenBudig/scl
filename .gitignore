@@ -57,5 +57,10 @@ Thumbs.db
 
 # Output artifacts
 output/
+out/
 LAB-full.md
 lab-presentation.html
+
+#python
+.venv/
+__pycache__/
