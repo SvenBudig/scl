@@ -24,7 +24,71 @@ jobs:
         run: |
           docker build -t supply-chain-tools -f tools/Dockerfile .
 
+      # -------------------------
+      # Phase 1: Security Scans
+      # -------------------------
       - name: Run all security scans
         run: |
           task scan-all
 
+      # -------------------------
+      # Phase 2: Attestations
+      # -------------------------
+
+      # 1) Buildx docker-container driver für Provenance + SBOM
+      - name: Set up Buildx (docker-container driver)
+        run: |
+          docker buildx create --name container-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      # 2) Image mit Attestations-Artefakten in out/ bauen
+      - name: Build image with attestation artifacts
+        run: |
+          task build-image-with-attestation
+
+      # 3) Provenance + SBOM Predicate extrahieren
+      - name: Extract provenance and SBOM predicates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          mkdir -p attestations
+          # SLSA Provenance Attestation
+          cat out/provenance.json | jq .predicate | tee attestations/provenance.json
+          # SBOM Attestation
+          jq '.predicate' out/sbom.spdx.json > attestations/sbom.json
+
+      # 4) Provenance validieren
+      - name: Validate provenance attestation
+        run: |
+          task validate:provenance
+
+      # 5) SBOM validieren
+      - name: Validate SBOM attestation
+        run: |
+          task validate:sbom
+
+      # 6) App-Image bauen (für Vulnerability Attestations)
+      - name: Build application image
+        run: |
+          task build-image
+
+      # 7) Vulnerability Attestations erzeugen (Source, IaC, Image)
+      - name: Generate vulnerability attestations
+        run: |
+          mkdir -p attestations
+          # Source / Dependencies
+          task exec -- trivy fs --format cosign-vuln src/ > attestations/vuln-source.json
+          # IaC
+          task exec -- trivy config --format cosign-vuln src/iac/ > attestations/vuln-iac.json
+          # Container Image
+          task exec -- trivy image --format cosign-vuln supply-chain-app:latest > attestations/vuln-image.json
+
+      # 8) Alle Attestations auflisten
+      - name: List all attestations
+        run: |
+          ls -lh attestations/
+
+      # 9) Alle Attestations validieren
+      - name: Validate all attestations
+        run: |
+          task validate:all-attestations
