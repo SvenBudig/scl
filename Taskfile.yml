@@ -47,7 +47,7 @@ tasks:
   scan-dockerfile:
     desc: "🐳 Scan Dockerfile in Docker"
     cmds:
-      - "{{.DOCKER_RUN}} task _scan-dockerfile -- severity MEDIUM,HIGH,CRITICAL"
+      - "{{.DOCKER_RUN}} task _scan-dockerfile"
 
   scan-iac:
     desc: "🏗️ Scan IaC in Docker"
@@ -296,7 +296,7 @@ tasks:
     cmds:
       - echo "🐳 Scanning Dockerfile..."
       - echo "ℹ️ Using Trivy to scan for Dockerfile misconfigurations"
-      - trivy config src/docker/Dockerfile
+      - trivy config src/docker/Dockerfile --severity MEDIUM,HIGH,CRITICAL
 
   _scan-iac:
     # Internal: Scan Infrastructure as Code with Checkov
