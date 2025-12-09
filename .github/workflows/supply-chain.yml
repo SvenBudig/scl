@@ -1,15 +1,22 @@
-name: security-scan
+name: supply-chain
 
 on:
   push:
     branches: [ main ]
 
 permissions:
+  id-token: write      # für Cosign keyless (GitHub OIDC)
   contents: read
+  packages: write      # für ghcr.io Push
 
 jobs:
   security:
     runs-on: ubuntu-latest
+
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: supply-chain-app
+      IMAGE: ghcr.io/${{ github.repository_owner }}/supply-chain-app
 
     steps:
       - name: Checkout repository
@@ -38,7 +45,7 @@ jobs:
       # 1) Buildx docker-container driver für Provenance + SBOM
       - name: Set up Buildx (docker-container driver)
         run: |
-          docker buildx create --name container-builder --driver docker-container --use
+          docker buildx create --name container-builder --driver docker-container --use || true
           docker buildx inspect --bootstrap
 
       # 2) Image mit Attestations-Artefakten in out/ bauen
@@ -68,7 +75,7 @@ jobs:
           task validate:sbom
 
       # 6) App-Image bauen (für Vulnerability Attestations)
-      - name: Build application image
+      - name: Build application image (local)
         run: |
           task build-image
 
@@ -92,3 +99,126 @@ jobs:
       - name: Validate all attestations
         run: |
           task validate:all-attestations
+
+      # -------------------------
+      # Phase 3: Sign & Verify
+      # -------------------------
+
+      # 10) Login bei GHCR
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 11) Image nach GHCR bauen & pushen (mit BuildKit-Provenance/SBOM)
+      - name: Build and push image to ghcr.io
+        id: build-and-push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src
+          file: ./src/docker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:latest
+          provenance: mode=max
+          sbom: true
+
+      # Digest exportieren für Cosign & Rekor
+      - name: Export image digest
+        run: echo "IMAGE_DIGEST=${{ steps.build-and-push.outputs.digest }}" >> $GITHUB_ENV
+
+      # 12) Cosign installieren (keyless, OIDC)
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.0'
+
+      # 13) Image signieren (keyless)
+      - name: Sign image (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+        run: |
+          echo "Signing image: ${IMAGE_REF}"
+          cosign sign --yes "${IMAGE_REF}"
+
+      # 14) 5 Attestations anhängen (provenance, sbom, 3x vuln)
+      - name: Attach attestations (provenance, sbom, vuln-*)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+        run: |
+          echo "Attaching attestations to ${IMAGE_REF}"
+          cosign attest --yes \
+            --type slsaprovenance \
+            --predicate attestations/provenance.json \
+            "${IMAGE_REF}"
+
+          cosign attest --yes \
+            --type sbom \
+            --predicate attestations/sbom.json \
+            "${IMAGE_REF}"
+
+          cosign attest --yes \
+            --type vuln-source \
+            --predicate attestations/vuln-source.json \
+            "${IMAGE_REF}"
+
+          cosign attest --yes \
+            --type vuln-iac \
+            --predicate attestations/vuln-iac.json \
+            "${IMAGE_REF}"
+
+          cosign attest --yes \
+            --type vuln-image \
+            --predicate attestations/vuln-image.json \
+            "${IMAGE_REF}"
+
+      # 15) Verify: Image-Signatur
+      - name: Verify image signature with cosign
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+        run: |
+          echo "Verifying image signature for ${IMAGE_REF}"
+          cosign verify --experimental-oci11 \
+            --certificate-identity-regexp="https://github.com/.+" \
+            --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
+            "${IMAGE_REF}"
+
+      # 16) Verify: Attestations (provenance, sbom, 3x vuln)
+      - name: Verify attestations with cosign
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+        run: |
+          set -e
+          for t in slsaprovenance sbom vuln-source vuln-iac vuln-image; do
+            echo "Verifying attestation type: $t"
+            cosign verify-attestation --experimental-oci11 \
+              --type "$t" \
+              --certificate-identity-regexp="https://github.com/.+" \
+              --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
+              "${IMAGE_REF}" > /dev/null
+          done
+          echo "All 5 attestations verified successfully."
+
+      # 17) Check Rekor: mind. 6 Einträge für Digest
+      - name: Check Rekor entries
+        env:
+          IMAGE_DIGEST: ${{ env.IMAGE_DIGEST }}
+        run: |
+          HASH="${IMAGE_DIGEST#sha256:}"
+          echo "Checking Rekor for SHA: ${HASH}"
+          # Rekor-CLI via tools-container
+          task exec -- rekor-cli search --sha "${HASH}" > rekor-search.txt
+          cat rekor-search.txt
+
+          ENTRY_COUNT=$(grep -E '^[0-9a-f]{64}$' rekor-search.txt | wc -l || echo "0")
+          echo "Found ${ENTRY_COUNT} Rekor entries"
+
+          if [ "${ENTRY_COUNT}" -lt 6 ]; then
+            echo "❌ Expected at least 6 Rekor entries (1 signature + 5 attestations)"
+            exit 1
+          fi
+
+          echo "✅ Rekor has at least 6 entries for this digest."
