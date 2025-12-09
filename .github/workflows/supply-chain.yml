@@ -122,7 +122,17 @@ jobs:
           echo "Signing image: ${IMAGE_REF}"
           cosign sign --yes "${IMAGE_REF}"
 
-      #Hier evtl Verify and Extract Identity
+      - name: Verify signature exists in Rekor
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+        run: |
+          echo "🔍 Checking for cosign signature in artifact list..."
+          cosign tree --experimental-oci11 "${IMAGE_REF}" | grep -q "sign/v1" || {
+            echo "❌ No cosign sign/v1 signature found."
+            exit 1
+          }
+          echo "✅ Signature present."
+
 
       - name: Attach all 5 attestations
         env:
