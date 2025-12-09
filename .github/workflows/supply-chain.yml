@@ -85,80 +85,78 @@ jobs:
       - name: Validate all attestations
         run: task validate:all-attestations
 
+          # -------------------------
+      # Phase 3: Sign, Attest, Verify
       # -------------------------
-      # Phase 3: Sign, Attest, Verify (ttl.sh)
-      # -------------------------
 
-      - name: Build local image for ttl.sh
+      - name: Build and tag image for ttl.sh
         run: |
-          task build-image
-          docker tag supply-chain-app:latest ttl.sh/supply-chain-app-${HOSTNAME}:3h
+          IMAGE_NAME=ttl.sh/supply-chain-app-${{ github.run_id }}:3h
+          docker build -t supply-chain-app:latest -f src/docker/Dockerfile src/
+          docker tag supply-chain-app:latest $IMAGE_NAME
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
 
-      - name: Push image to ttl.sh and capture digest
+      - name: Push to ttl.sh and extract digest
         run: |
-          docker push ttl.sh/supply-chain-app-${HOSTNAME}:3h 2>&1 | tee push-output.txt
-          export DIGEST=$(grep "digest:" push-output.txt | awk '{print $3}')
-          echo "DIGEST=${DIGEST}" >> $GITHUB_ENV
-          echo "IMAGE=ttl.sh/supply-chain-app-${HOSTNAME}@${DIGEST}" >> $GITHUB_ENV
-
-      - name: Show image reference
-        run: |
-          echo "Image: $IMAGE"
+          docker push $IMAGE_NAME 2>&1 | tee push-output.txt
+          DIGEST=$(grep "digest:" push-output.txt | awk '{print $3}')
+          IMAGE_REF="${IMAGE_NAME%@*}@$DIGEST"
+          echo "DIGEST=$DIGEST" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE_REF" >> $GITHUB_ENV
+          echo "Pushed image: $IMAGE_REF"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image (keyless)
+      - name: Sign image with Cosign (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          task exec -- cosign sign --yes $IMAGE
+          echo "Signing image: $IMAGE"
+          cosign sign --yes "$IMAGE"
+
+      - name: Attach attestations (provenance, sbom, vuln)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign attest --yes --type slsaprovenance --predicate attestations/provenance.json "$IMAGE"
+          cosign attest --yes --type spdxjson        --predicate attestations/sbom.json "$IMAGE"
+          cosign attest --yes --type vuln            --predicate attestations/vuln-source.json "$IMAGE"
+          cosign attest --yes --type vuln            --predicate attestations/vuln-iac.json "$IMAGE"
+          cosign attest --yes --type vuln            --predicate attestations/vuln-image.json "$IMAGE"
 
       - name: Verify image signature
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          task exec -- cosign verify \
+          cosign verify \
             --certificate-identity-regexp=".*" \
             --certificate-oidc-issuer-regexp=".*" \
-            $IMAGE | jq
+            "$IMAGE" | jq
 
-      - name: Attach provenance attestation
+      - name: Verify all attestations
+        env:
+          COSIGN_EXPERIMENTAL: "true"
         run: |
-          task exec -- cosign attest --yes \
-            --type slsaprovenance \
-            --predicate attestations/provenance.json \
-            $IMAGE
+          for t in slsaprovenance spdxjson vuln; do
+            echo "Verifying attestation: $t"
+            cosign verify-attestation \
+              --type "$t" \
+              --certificate-identity-regexp=".*" \
+              --certificate-oidc-issuer-regexp=".*" \
+              "$IMAGE" | jq
+          done
 
-      - name: Verify provenance attestation
+      - name: Check Rekor transparency log
         run: |
-          task exec -- cosign verify-attestation \
-            --type slsaprovenance \
-            --certificate-identity-regexp=".*" \
-            --certificate-oidc-issuer-regexp=".*" \
-            $IMAGE | jq
-
-      - name: Attach SBOM attestation
-        run: |
-          task exec -- cosign attest --yes \
-            --type spdxjson \
-            --predicate attestations/sbom.json \
-            $IMAGE
-
-      - name: Attach vulnerability attestations
-        run: |
-          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-source.json $IMAGE
-          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-iac.json $IMAGE
-          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-image.json $IMAGE
-
-      - name: Check Rekor entries
-        run: |
-          HASH=$(echo $DIGEST | cut -d: -f2)
-          task exec -- rekor-cli search --sha $HASH | tee rekor.txt
-          COUNT=$(cat rekor.txt | grep -E '^[0-9a-f]{64}$' | wc -l)
-          echo "Found $COUNT Rekor entries"
-          if [ "$COUNT" -lt 6 ]; then
-            echo "❌ Not enough Rekor entries"
+          HASH=$(echo "$DIGEST" | cut -d: -f2)
+          echo "Checking Rekor for hash: $HASH"
+          rekor-cli search --sha "$HASH" | tee rekor-output.txt
+          ENTRY_COUNT=$(grep -E '^[a-f0-9]{64}$' rekor-output.txt | wc -l)
+          echo "Found $ENTRY_COUNT Rekor entries"
+          if [ "$ENTRY_COUNT" -lt 6 ]; then
+            echo "❌ Not enough Rekor entries (expected: 6)"
             exit 1
           fi
-          echo "✅ Rekor entries OK"
+          echo "✅ Rekor entries valid (>= 6)"
+
