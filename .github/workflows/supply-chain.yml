@@ -188,13 +188,22 @@ jobs:
           IMAGE_DIGEST: ${{ env.IMAGE_DIGEST }}
         run: |
           HASH="${IMAGE_DIGEST#sha256:}"
-          echo "Checking Rekor entries for SHA: $HASH"
-          task exec -- rekor-cli search --sha "$HASH" > rekor-output.txt
-          cat rekor-output.txt
-          COUNT=$(grep -E '^[a-f0-9]{64}$' rekor-output.txt | wc -l)
-          echo "Found Rekor entries: $COUNT"
-          if [ "$COUNT" -lt 6 ]; then
-            echo "❌ Rekor entry count insufficient (need 6)"
+          echo "🔍 Checking Rekor entries for SHA: $HASH"
+      
+          # Abfrage im JSON-Format (robuster als Textausgabe)
+          task exec -- rekor-cli search --sha "$HASH" --format json > rekor-output.json
+      
+          # Ausgabe prüfen
+          cat rekor-output.json | jq
+      
+          # Anzahl zählen
+          ENTRY_COUNT=$(jq length rekor-output.json)
+          echo "🧮 Found Rekor entries: $ENTRY_COUNT"
+      
+          if [ "$ENTRY_COUNT" -lt 6 ]; then
+            echo "❌ Rekor entry count insufficient (need at least 6)"
             exit 1
           fi
+      
           echo "✅ Rekor has at least 6 entries (1 signature + 5 attestations)."
+
