@@ -158,7 +158,7 @@ tasks:
         # Verify signature and attestations in one call
         echo ""
         echo "🔐 Verifying signature and attestations..."
-        VERIFY_OUTPUT=$(cosign verify --experimental-oci11 --certificate-identity-regexp=".*" --certificate-oidc-issuer-regexp=".*" $IMAGE 2>&1)
+        VERIFY_OUTPUT=$(task exec -- cosign verify --experimental-oci11 --certificate-identity-regexp=".*" --certificate-oidc-issuer-regexp=".*" $IMAGE 2>&1)
         
         if ! echo "$VERIFY_OUTPUT" | grep -q "Verification for"; then
           echo "❌ Verification failed"
@@ -197,7 +197,7 @@ tasks:
         echo ""
         echo "📝 Checking Rekor transparency log..."
         HASH=$(echo $DIGEST | cut -d: -f2)
-        ENTRY_COUNT=$(rekor-cli search --sha $HASH 2>/dev/null | grep -c "^[a-f0-9]" || echo "0")
+        ENTRY_COUNT=$(task exec -- rekor-cli search --sha $HASH 2>/dev/null | grep -c "^[a-f0-9]" || echo "0")
         
         echo "   Found $ENTRY_COUNT Rekor entries"
         
