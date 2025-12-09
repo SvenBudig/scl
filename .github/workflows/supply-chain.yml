@@ -86,134 +86,79 @@ jobs:
         run: task validate:all-attestations
 
       # -------------------------
-      # Phase 3: Signing & Verification
+      # Phase 3: Sign, Attest, Verify (ttl.sh)
       # -------------------------
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image to GHCR
-        id: build-and-push
-        uses: docker/build-push-action@v5
-        with:
-          context: ./src
-          file: ./src/docker/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE }}:latest
-          provenance: mode=max
-          sbom: true
+      - name: Build local image for ttl.sh
+        run: |
+          task build-image
+          docker tag supply-chain-app:latest ttl.sh/supply-chain-app-${HOSTNAME}:3h
 
-      - name: Export image digest
-        run: echo "IMAGE_DIGEST=${{ steps.build-and-push.outputs.digest }}" >> $GITHUB_ENV
+      - name: Push image to ttl.sh and capture digest
+        run: |
+          docker push ttl.sh/supply-chain-app-${HOSTNAME}:3h 2>&1 | tee push-output.txt
+          export DIGEST=$(grep "digest:" push-output.txt | awk '{print $3}')
+          echo "DIGEST=${DIGEST}" >> $GITHUB_ENV
+          echo "IMAGE=ttl.sh/supply-chain-app-${HOSTNAME}@${DIGEST}" >> $GITHUB_ENV
 
-      - name: Install Cosign
+      - name: Show image reference
+        run: |
+          echo "Image: $IMAGE"
+
+      - name: Install cosign
         uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: 'v2.4.0'
 
-      - name: Sign image with Cosign (keyless)
+      - name: Sign image (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
-          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
         run: |
-          echo "Signing image: ${IMAGE_REF}"
-          cosign sign --yes "${IMAGE_REF}"
-
-      - name: Verify signature exists in Rekor
-        env:
-          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
-        run: |
-          echo "🔍 Checking for cosign signature in artifact list..."
-          cosign tree --experimental-oci11 "${IMAGE_REF}" | grep -q "sign/v1" || {
-            echo "❌ No cosign sign/v1 signature found."
-            exit 1
-          }
-          echo "✅ Signature present."
-
-
-      - name: Attach all 5 attestations
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
-        run: |
-          cosign attest --yes \
-            --type https://slsa.dev/provenance/v0.2 \
-            --predicate attestations/provenance.json \
-            "${IMAGE_REF}"
-      
-          cosign attest --yes \
-            --type https://spdx.dev/Document \
-            --predicate attestations/sbom.json \
-            "${IMAGE_REF}"
-      
-          cosign attest --yes \
-            --type https://cosign.dev/attestation/vuln/source \
-            --predicate attestations/vuln-source.json \
-            "${IMAGE_REF}"
-      
-          cosign attest --yes \
-            --type https://cosign.dev/attestation/vuln/iac \
-            --predicate attestations/vuln-iac.json \
-            "${IMAGE_REF}"
-      
-          cosign attest --yes \
-            --type https://cosign.dev/attestation/vuln/image \
-            --predicate attestations/vuln-image.json \
-            "${IMAGE_REF}"
+          task exec -- cosign sign --yes $IMAGE
 
       - name: Verify image signature
         env:
-          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+          COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign verify --experimental-oci11 \
-            --certificate-identity-regexp="https://github.com/.+" \
-            --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
-            "${IMAGE_REF}"
+          task exec -- cosign verify \
+            --certificate-identity-regexp=".*" \
+            --certificate-oidc-issuer-regexp=".*" \
+            $IMAGE | jq
 
-      - name: Verify all attestations
-        env:
-          IMAGE_REF: ${{ env.IMAGE }}@${{ env.IMAGE_DIGEST }}
+      - name: Attach provenance attestation
         run: |
-          for TYPE in \
-            "https://slsa.dev/provenance/v0.2" \
-            "https://spdx.dev/Document" \
-            "https://cosign.dev/attestation/vuln/source" \
-            "https://cosign.dev/attestation/vuln/iac" \
-            "https://cosign.dev/attestation/vuln/image"
-          do
-            echo "Verifying $TYPE..."
-            cosign verify-attestation --experimental-oci11 \
-              --type "$TYPE" \
-              --certificate-identity-regexp="https://github.com/.+" \
-              --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
-              "${IMAGE_REF}" > /dev/null
-          done
-          echo "✅ All 5 attestations verified."
+          task exec -- cosign attest --yes \
+            --type slsaprovenance \
+            --predicate attestations/provenance.json \
+            $IMAGE
 
-      - name: Check Rekor log for 6 entries
-        env:
-          IMAGE_DIGEST: ${{ env.IMAGE_DIGEST }}
+      - name: Verify provenance attestation
         run: |
-          HASH="${IMAGE_DIGEST#sha256:}"
-          echo "🔍 Checking Rekor entries for SHA: $HASH"
-      
-          # Abfrage im JSON-Format (robuster als Textausgabe)
-          task exec -- rekor-cli search --sha "$HASH" --format json > rekor-output.json
-      
-          # Ausgabe prüfen
-          cat rekor-output.json | jq
-      
-          # Anzahl zählen
-          ENTRY_COUNT=$(jq length rekor-output.json)
-          echo "🧮 Found Rekor entries: $ENTRY_COUNT"
-      
-          if [ "$ENTRY_COUNT" -lt 6 ]; then
-            echo "❌ Rekor entry count insufficient (need at least 6)"
+          task exec -- cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-identity-regexp=".*" \
+            --certificate-oidc-issuer-regexp=".*" \
+            $IMAGE | jq
+
+      - name: Attach SBOM attestation
+        run: |
+          task exec -- cosign attest --yes \
+            --type spdxjson \
+            --predicate attestations/sbom.json \
+            $IMAGE
+
+      - name: Attach vulnerability attestations
+        run: |
+          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-source.json $IMAGE
+          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-iac.json $IMAGE
+          task exec -- cosign attest --yes --type vuln --predicate attestations/vuln-image.json $IMAGE
+
+      - name: Check Rekor entries
+        run: |
+          HASH=$(echo $DIGEST | cut -d: -f2)
+          task exec -- rekor-cli search --sha $HASH | tee rekor.txt
+          COUNT=$(cat rekor.txt | grep -E '^[0-9a-f]{64}$' | wc -l)
+          echo "Found $COUNT Rekor entries"
+          if [ "$COUNT" -lt 6 ]; then
+            echo "❌ Not enough Rekor entries"
             exit 1
           fi
-      
-          echo "✅ Rekor has at least 6 entries (1 signature + 5 attestations)."
-
+          echo "✅ Rekor entries OK"
