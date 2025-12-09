@@ -198,10 +198,10 @@ tasks:
         echo "📝 Checking Rekor transparency log..."
         HASH=$(echo $DIGEST | cut -d: -f2)
         #ENTRY_COUNT=$(task exec -- rekor-cli search --sha $HASH 2>/dev/null | grep -c "^[a-f0-9]" || echo "0")
-        ENTRY_COUNT=$(task exec -- rekor-cli search --sha "$HASH" 2>/dev/null \
-          | grep -Eo '[0-9a-f]{64}' \
-          | wc -l \
-          || echo "0"
+        ENTRY_COUNT=$(
+          task exec -- rekor-cli search --sha "$HASH" 2>/dev/null \
+            | wc -l \
+            || echo "0"
         )
         
         echo "   Found $ENTRY_COUNT Rekor entries"
